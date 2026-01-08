@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,19 +31,31 @@ func main() {
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("id"))
 
+		clientIP, ipRange := getClientIP(r)
+		log.Printf("Incoming request: %s %s id=%d from=%s range=%s", r.Method, r.URL.Path, msgID, clientIP, ipRange)
+
 		// ۱. چک کردن کش
 		if loc, size, found := getCachedLocation(msgID); found {
+			log.Printf("Cache hit for msg=%d size=%d", msgID, size)
 			handleFileStream(r.Context(), w, pool.GetNext(), loc, size)
 			return
 		}
+		log.Printf("Cache miss for msg=%d", msgID)
 
 		// ۲. پیدا کردن فایل (اگر در کش نبود)
 		api := pool.GetNext()
+		if api == nil {
+			log.Printf("no available bot clients to handle request for msg=%d", msgID)
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		log.Printf("Fetching msg=%d from channel=%d", msgID, channelID)
 		res, err := api.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
 			Channel: &tg.InputChannel{ChannelID: channelID},
 			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
 		})
 		if err != nil {
+			log.Printf("ChannelsGetMessages error for msg=%d: %v", msgID, err)
 			http.Error(w, "error fetching message", http.StatusInternalServerError)
 			return
 		}
@@ -49,19 +63,71 @@ func main() {
 		// استخراج لوکیشن از پاسخ
 		loc, size, ok := extractDocumentFromResponse(res)
 		if !ok || loc == nil {
+			log.Printf("No document found in msg=%d", msgID)
 			http.Error(w, "file not found in message", http.StatusNotFound)
 			return
 		}
 
+		log.Printf("Found document for msg=%d size=%d — caching and streaming", msgID, size)
 		setCachedLocation(msgID, loc, size)
+		log.Printf("Start streaming msg=%d size=%d to %s", msgID, size, clientIP)
 		handleFileStream(r.Context(), w, api, loc, size)
 	})
 
-	log.Println("Server ready on localhost:8080")
-	err := http.ListenAndServe("127.0.0.1:8080", nil)
+	// client IP helper is defined at package level
+
+	// Bind address can be configured with BIND_ADDR (e.g. 0.0.0.0:2040) or PORT
+	bindAddr := os.Getenv("BIND_ADDR")
+	if bindAddr == "" {
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "2040"
+		}
+		bindAddr = ":" + port
+	}
+	log.Printf("Server ready on %s", bindAddr)
+
+	err := http.ListenAndServe(bindAddr, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// getClientIP returns the best-effort remote IP and a simple range (/24 or /64)
+func getClientIP(r *http.Request) (string, string) {
+	ip := strings.TrimSpace(r.Header.Get("X-Real-IP"))
+	if ip == "" {
+		xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+		if xff != "" {
+			parts := strings.Split(xff, ",")
+			ip = strings.TrimSpace(parts[0])
+		}
+	}
+	if ip == "" {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		} else {
+			ip = host
+		}
+	}
+
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip, ""
+	}
+	if parsed.To4() != nil {
+		parts := strings.Split(ip, ".")
+		if len(parts) >= 3 {
+			return ip, fmt.Sprintf("%s.%s.%s.0/24", parts[0], parts[1], parts[2])
+		}
+		return ip, ""
+	}
+	hext := strings.Split(ip, ":")
+	if len(hext) >= 4 {
+		return ip, strings.Join(hext[:4], ":") + "::/64"
+	}
+	return ip, ""
 }
 
 // extractDocumentFromResponse inspects the response from ChannelsGetMessages and returns

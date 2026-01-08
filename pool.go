@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync/atomic"
 
 	"github.com/gotd/td/session"
@@ -25,16 +26,34 @@ func NewBotPool(ctx context.Context, apiID int, apiHash string, tokens []string)
 			NoUpdates:      true,
 		})
 
-		go func(t string) {
-			_ = client.Run(ctx, func(ctx context.Context) error {
-				status, _ := client.Auth().Status(ctx)
+		go func(t string, c *telegram.Client) {
+			short := t
+			if len(t) > 8 {
+				short = t[:8]
+			}
+			if err := c.Run(ctx, func(ctx context.Context) error {
+				status, err := c.Auth().Status(ctx)
+				if err != nil {
+					log.Printf("auth status error for bot %s: %v", short, err)
+				}
 				if !status.Authorized {
-					_, _ = client.Auth().Bot(ctx, t)
+					_, err := c.Auth().Bot(ctx, t)
+					if err != nil {
+						log.Printf("bot auth failed for %s: %v", short, err)
+					} else {
+						log.Printf("bot authorized for %s", short)
+					}
+				} else {
+					log.Printf("bot already authorized for %s", short)
 				}
 				<-ctx.Done()
 				return nil
-			})
-		}(token)
+			}); err != nil {
+				log.Printf("client.Run exited for %s: %v", short, err)
+			} else {
+				log.Printf("client.Run exited for %s", short)
+			}
+		}(token, client)
 
 		pool.clients = append(pool.clients, tg.NewClient(client))
 	}
@@ -42,6 +61,9 @@ func NewBotPool(ctx context.Context, apiID int, apiHash string, tokens []string)
 }
 
 func (p *BotPool) GetNext() *tg.Client {
+	if len(p.clients) == 0 {
+		return nil
+	}
 	idx := atomic.AddUint64(&p.index, 1) % uint64(len(p.clients))
 	return p.clients[idx]
 }
