@@ -59,13 +59,29 @@ func main() {
 		targetBot := botClients[time.Now().UnixNano()%int64(len(botClients))]
 
 		// گلوله حقیقت: حداکثر ۲ تلاش برای مقابله با انقضای فایل
-		for attempt := 1; attempt <= 2; attempt++ {
+		for attempt := 1; attempt <= 1; attempt++ {
 			access, err := ensureChannelAccess(r.Context(), targetBot.API, targetBot.BotID, channelID)
 			if err != nil {
 				http.Error(w, "Access error", 500)
 				return
 			}
+			_, testErr := targetBot.API.MessagesSendMessage(r.Context(), &tg.MessagesSendMessageRequest{
+				Peer: &tg.InputPeerChannel{
+					ChannelID:  channelID,
+					AccessHash: int64(access),
+				},
+				Message:  fmt.Sprintf("Test access from Bot: %d", targetBot.BotID),
+				RandomID: int64(time.Now().UnixNano()), // برای جلوگیری از پیام تکراری
+			})
 
+			if testErr != nil {
+				logger.Error("access_hash.invalid",
+					slog.Int64("bot", targetBot.BotID),
+					slog.String("err", testErr.Error()))
+				http.Error(w, "Access Hash Verification Failed", 500)
+				return
+			}
+			logger.Info("access_hash.verified", slog.Int64("bot", targetBot.BotID))
 			cachedLoc, cachedSize, found := getCachedLocation(msgID, targetBot.BotID)
 			logger.Info("stream.request", slog.Int("msg", msgID), slog.Int64("bot", targetBot.BotID), slog.Bool("cache_hit", found))
 			var loc *tg.InputDocumentFileLocation
