@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -12,53 +15,91 @@ import (
 )
 
 func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Request, api *tg.Client, location tg.InputFileLocationClass, size int64) {
+	// ۱. تنظیم هدرهای پایه
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	logger.Info("stream.started", slog.Int64("size", size))
+	startOffset := int64(0)
+	endOffset := size - 1
 
-// ۲. اگر درخواست از نوع HEAD بود، همین‌جا کار را تمام کن
-	if r.Method == http.MethodHead {
-		logger.Info("head request handled")
-		return 
+	// ۲. مدیریت Range Request (حیاتی برای دانلود منیجرها)
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader != "" && strings.HasPrefix(rangeHeader, "bytes=") {
+		parts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
+		if len(parts) == 2 {
+			if s, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+				startOffset = s
+			}
+			if e, err := strconv.ParseInt(parts[1], 10, 64); err == nil && parts[1] != "" {
+				endOffset = e
+			}
+		}
+
+		if startOffset >= size || startOffset > endOffset {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startOffset, endOffset, size))
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", endOffset-startOffset+1))
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	}
-	const chunkSize = 1024 * 1024 // 1MB
-	offset := int64(0)
 
-	for offset < size {
+	// ۳. پاسخ به متد HEAD (فقط هدرها را می‌خواهد)
+	if r.Method == http.MethodHead {
+		logger.Info("head request handled", slog.Int64("size", size))
+		return
+	}
+
+	logger.Info("stream.started", slog.Int64("from", startOffset), slog.Int64("to", endOffset))
+
+	// ۴. حلقه اصلی استریم با آفست داینامیک
+	const chunkSize = 1024 * 1024 // 1MB
+	offset := startOffset
+
+	for offset <= endOffset {
+		// محاسبه دقیق مقدار دیتای باقی‌مانده برای این چانک
+		currentLimit := chunkSize
+		if offset+int64(currentLimit) > endOffset {
+			currentLimit = int(endOffset - offset + 1)
+		}
+
 		res, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
 			Location: location,
-			Offset:   int64(offset),
-			Limit:    chunkSize,
+			Offset:   offset,
+			Limit:    currentLimit,
 		})
 
 		if err != nil {
-			// چک کردن اینکه آیا ارور از نوع FLOOD_WAIT است یا خیر
 			if seconds, ok := tgerr.AsFloodWait(err); ok {
 				logger.Warn("flood wait detected", slog.Int("seconds", int(seconds)))
-
-				// به اندازه ای که تلگرام دستور داده صبر کن (مثلاً ۲ ثانیه)
 				time.Sleep(time.Duration(seconds) * time.Second)
-				continue // دوباره همان چانک قبلی را درخواست بده
+				continue
 			}
 
+			// اگر کاربر وسط دانلود صفحه را بست، بیخودی ارور لاگ نکن
+			if errors.Is(err, context.Canceled) {
+				return
+			}
 			logger.Error("upload.getfile.error", slog.String("err", err.Error()))
 			return
 		}
 
 		if chunk, ok := res.(*tg.UploadFile); ok {
-			_, err := w.Write(chunk.Bytes)
+			n, err := w.Write(chunk.Bytes)
 			if err != nil {
-				return // قطع اتصال از سمت کاربر
+				return // کاربر اتصال را قطع کرد
 			}
-			offset += int64(len(chunk.Bytes))
+			offset += int64(n)
 
-			// یک استراحت بسیار کوتاه برای اینکه تلگرام شک نکند
+			// یک وقفه بسیار کوتاه برای جلوگیری از Flood تلگرام
 			time.Sleep(10 * time.Millisecond)
 		} else {
 			break
 		}
 	}
-	logger.Info("stream.finished", slog.Int64("size", size))
+	logger.Info("stream.finished", slog.Int64("offset", offset))
 }
