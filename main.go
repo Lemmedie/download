@@ -16,6 +16,8 @@ import (
 	"github.com/joho/godotenv"
 )
 
+var logger = slog.Default()
+
 type BotClient struct {
 	API   *tg.Client
 	BotID int64
@@ -31,6 +33,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
+	// فرض بر این است که NewBotPool و متدهای کش در فایل‌های دیگر شما تعریف شده‌اند
 	pool, err := NewBotPool(ctx, apiID, apiHash, tokens)
 	if err != nil {
 		panic(err)
@@ -45,86 +48,80 @@ func main() {
 		}
 	}
 
-	for _, bc := range botClients {
-		go func(bot BotClient) {
-			acc, err := ensureChannelAccess(ctx, bot.API, bot.BotID, channelID)
-			if err == nil {
-				logger.Info("bot.ready", slog.Int64("id", bot.BotID), slog.Uint64("hash", acc))
-			}
-		}(bc)
-	}
-
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("id"))
+		// انتخاب رندوم بات برای توزیع بار
 		targetBot := botClients[time.Now().UnixNano()%int64(len(botClients))]
 
 		for attempt := 1; attempt <= 2; attempt++ {
-			// دسترسی به کانال برای متد GetMessages
+			// ۱. دریافت دسترسی کانال برای متد GetMessages
 			channelAccess, err := ensureChannelAccess(r.Context(), targetBot.API, targetBot.BotID, channelID)
 			if err != nil {
-				http.Error(w, "Access error", 500)
+				http.Error(w, "Channel access error", 500)
 				return
 			}
 
+			// ۲. بررسی کش (شامل AccessHash خودِ فایل)
 			cachedLoc, cachedSize, found := getCachedLocation(msgID, targetBot.BotID)
 			var loc *tg.InputDocumentFileLocation
 			var size int64
-			cached := found
+			isFromCache := found
 
 			if found {
 				loc = &tg.InputDocumentFileLocation{
 					ID:            cachedLoc.ID,
-					AccessHash:    cachedLoc.AccessHash, // استفاده از هش خود فایل از کش
+					AccessHash:    cachedLoc.AccessHash, // استفاده از هش فایل
 					FileReference: cachedLoc.FileReference,
 				}
 				size = cachedSize
 			} else {
+				// ۳. واکشی اطلاعات از تلگرام در صورت عدم وجود در کش
 				res, err := targetBot.API.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
 					Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(channelAccess)},
 					ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
 				})
 				if err != nil {
-					http.Error(w, "Telegram fetch error", 500)
+					http.Error(w, "Telegram API error", 500)
 					return
 				}
+
 				doc, s, err := extractDocumentFromResponse(res)
 				if err != nil {
-					http.Error(w, "File not found", 404)
+					http.Error(w, "Document not found", 404)
 					return
 				}
 				size = s
-				// ساخت لوکیشن با استفاده از AccessHash خودِ فایل (سند)
 				loc = &tg.InputDocumentFileLocation{
 					ID:            doc.ID,
-					AccessHash:    doc.AccessHash, // هشِ فایل، نه کانال!
+					AccessHash:    doc.AccessHash, // هش اختصاصی سند
 					FileReference: doc.FileReference,
 				}
-				logger.Info("fetched.from.telegram", slog.Int("msg", msgID), slog.Int64("bot", targetBot.BotID))
 			}
 
-			// فراخوانی اصلاح شده بدون پارامتر اضافی accessHash
+			// ۴. شروع استریم (ارسال loc شامل هش صحیح)
 			err = handleFileStream(r.Context(), w, r, targetBot.API, loc, size)
 
 			if err != nil {
 				if strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
-					logger.Warn("expired_ref_detected. clearing_cache_and_retrying", slog.Int("msg", msgID), slog.Int("attempt", attempt))
+					logger.Warn("Ref expired, retrying...", slog.Int("msg", msgID))
 					deleteCachedLocation(msgID, targetBot.BotID)
 					if attempt < 2 {
 						continue
 					}
 				}
-				logger.Error("stream.error", slog.String("err", err.Error()))
+				logger.Error("Stream failed", slog.String("error", err.Error()))
 				return
 			}
 
-			if !cached {
+			// ۵. ذخیره در کش فقط در صورت موفقیت استریم اولیه
+			if !isFromCache {
 				setCachedLocation(msgID, targetBot.BotID, loc, size)
 			}
 			break
 		}
 	})
 
-	logger.Info("server.running", slog.String("port", "2040"))
+	logger.Info("Server started on :2040")
 	_ = http.ListenAndServe(":2040", nil)
 }
 
@@ -138,22 +135,27 @@ func extractDocumentFromResponse(res tg.MessagesMessagesClass) (*tg.Document, in
 	case *tg.MessagesChannelMessages:
 		messages = v.Messages
 	default:
-		return nil, 0, fmt.Errorf("unexpected type: %T", res)
+		return nil, 0, fmt.Errorf("unknown response type")
 	}
+
 	if len(messages) == 0 {
-		return nil, 0, errors.New("no messages")
+		return nil, 0, errors.New("empty message list")
 	}
+
 	msg, ok := messages[0].(*tg.Message)
 	if !ok || msg.Media == nil {
-		return nil, 0, errors.New("no media")
+		return nil, 0, errors.New("no media in message")
 	}
+
 	mediaDoc, ok := msg.Media.(*tg.MessageMediaDocument)
 	if !ok {
-		return nil, 0, errors.New("not a document")
+		return nil, 0, errors.New("media is not a document")
 	}
+
 	doc, ok := mediaDoc.Document.(*tg.Document)
 	if !ok {
-		return nil, 0, errors.New("cast failed")
+		return nil, 0, errors.New("invalid document structure")
 	}
+
 	return doc, doc.Size, nil
 }
