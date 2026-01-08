@@ -66,7 +66,7 @@ func main() {
 				return
 			}
 
-			cachedLoc, cachedSize, found := getCachedLocation(msgID)
+			cachedLoc, cachedSize, found := getCachedLocation(msgID, targetBot.BotID)
 			var loc *tg.InputDocumentFileLocation
 			var size int64
 
@@ -93,7 +93,7 @@ func main() {
 				}
 				size = s
 				loc = &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: int64(access), FileReference: doc.FileReference}
-				setCachedLocation(msgID, loc, size)
+				setCachedLocation(msgID, targetBot.BotID, loc, size)
 			}
 
 			// تلاش برای استریم
@@ -103,7 +103,7 @@ func main() {
 				// چک کردن خطای انقضای رفرنس
 				if strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
 					logger.Warn("expired_ref_detected. clearing_cache_and_retrying", slog.Int("msg", msgID), slog.Int("attempt", attempt))
-					deleteCachedLocation(msgID)
+					deleteCachedLocation(msgID, targetBot.BotID)
 					if attempt < 2 {
 						continue
 					} // تلاش دوباره

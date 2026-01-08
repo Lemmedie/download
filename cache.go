@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -15,37 +16,48 @@ type CachedFile struct {
 }
 
 var (
-	fileCache = make(map[int]CachedFile)
+	// کلید مپ را به string تغییر می‌دهیم تا ترکیب msgID:botID باشد
+	fileCache = make(map[string]CachedFile)
 	cacheMu   sync.RWMutex
 )
 
-func getCachedLocation(msgID int) (*tg.InputDocumentFileLocation, int64, bool) {
+// تولید کلید یکتا برای هر فایل و هر ربات
+func getCacheKey(msgID int, botID int64) string {
+	return fmt.Sprintf("%d:%d", msgID, botID)
+}
+
+func getCachedLocation(msgID int, botID int64) (*tg.InputDocumentFileLocation, int64, bool) {
 	cacheMu.RLock()
 	defer cacheMu.RUnlock()
-	item, found := fileCache[msgID]
+
+	key := getCacheKey(msgID, botID)
+	item, found := fileCache[key]
+
 	if found && time.Now().Before(item.Expires) {
-		logger.Info("cache.hit", slog.Int("msg", msgID), slog.Int64("size", item.Size), slog.String("expires", item.Expires.Format(time.RFC3339)))
+		logger.Info("cache.hit", slog.Int("msg", msgID), slog.Int64("bot", botID))
 		return item.Location, item.Size, true
 	}
-	logger.Info("cache.miss", slog.Int("msg", msgID))
+	logger.Info("cache.miss", slog.Int("msg", msgID), slog.Int64("bot", botID))
 	return nil, 0, false
 }
 
-func setCachedLocation(msgID int, loc *tg.InputDocumentFileLocation, size int64) {
+func setCachedLocation(msgID int, botID int64, loc *tg.InputDocumentFileLocation, size int64) {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
-	fileCache[msgID] = CachedFile{
+
+	key := getCacheKey(msgID, botID)
+	fileCache[key] = CachedFile{
 		Location: loc,
 		Size:     size,
 		Expires:  time.Now().Add(3 * time.Hour),
 	}
-	logger.Info("cache.set", slog.Int("msg", msgID), slog.Int64("size", size), slog.String("expires", fileCache[msgID].Expires.Format(time.RFC3339)))
+	logger.Info("cache.set", slog.String("key", key))
 }
 
-// تابع جدید برای حذف کش فاسد
-func deleteCachedLocation(msgID int) {
+func deleteCachedLocation(msgID int, botID int64) {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
-	delete(fileCache, msgID)
-	logger.Warn("cache.deleted", slog.Int("msg", msgID))
+	key := getCacheKey(msgID, botID)
+	delete(fileCache, key)
+	logger.Warn("cache.deleted", slog.String("key", key))
 }
