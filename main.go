@@ -67,6 +67,7 @@ func main() {
 			}
 
 			cachedLoc, cachedSize, found := getCachedLocation(msgID, targetBot.BotID)
+			logger.Info("stream.request", slog.Int("msg", msgID), slog.Int64("bot", targetBot.BotID), slog.Bool("cache_hit", found))
 			var loc *tg.InputDocumentFileLocation
 			var size int64
 
