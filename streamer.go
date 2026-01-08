@@ -50,6 +50,7 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return nil
 	}
 
+	
 	const chunkSize = 1024 * 1024 // اندازه هر قطعه دریافتی از تلگرام (1 مگابایت)
 	offset := startOffset
 
