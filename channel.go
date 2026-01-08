@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"strconv"
 	"sync"
@@ -60,29 +61,40 @@ func ensureChannelAccess(ctx context.Context, api *tg.Client, channelID int64) (
 
 	// ۳. تلاش از طریق لیست گفتگوها (اگر ربات عضو کانال است)
 	res, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{Limit: 100})
-	if err == nil {
+	if err != nil {
+		logger.Error("failed to get dialogs", slog.String("err", err.Error()))
+	} else {
 		var chats []tg.ChatClass
-
 		switch v := res.(type) {
 		case *tg.MessagesDialogs:
 			chats = v.Chats
 		case *tg.MessagesDialogsSlice:
 			chats = v.Chats
-		case *tg.MessagesDialogsNotModified:
-			// در این حالت دیتای جدیدی نیامده، از کش استفاده می‌شود
 		}
 
+		logger.Info("checking dialogs list", slog.Int("count", len(chats)))
+
 		for _, chat := range chats {
-			if ch, ok := chat.(*tg.Channel); ok && ch.ID == channelID {
-				// تبدیل صریح int64 به uint64 برای مطابقت با ورودی تابع
-				acc := uint64(ch.AccessHash)
-				updateLocalCache(channelID, acc)
-				return acc, nil
+			// چاپ اطلاعات هر چت برای بررسی دستی
+			switch c := chat.(type) {
+			case *tg.Channel:
+				logger.Info("found channel in dialogs",
+					slog.String("title", c.Title),
+					slog.Int64("id", c.ID),
+					slog.Int64("access_hash", c.AccessHash),
+				)
+				if c.ID == channelID {
+					acc := uint64(c.AccessHash)
+					updateLocalCache(channelID, acc)
+					return acc, nil
+				}
+			case *tg.Chat:
+				logger.Info("found basic group (not channel)", slog.String("title", c.Title), slog.Int64("id", c.ID))
 			}
 		}
 	}
 
-	return 0, errors.New("حقیقت: ربات هیچ دسترسی به این کانال ندارد. یا ادمینش کن یا یوزرنیم درست بده")
+	return 0, errors.New("channel access not found")
 }
 
 func updateLocalCache(id int64, acc uint64) {
