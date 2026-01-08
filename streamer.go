@@ -31,7 +31,7 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, api *tg.Client
 		if err != nil {
 			// چک کردن اینکه آیا ارور از نوع FLOOD_WAIT است یا خیر
 			if seconds, ok := tgerr.AsFloodWait(err); ok {
-				logger.Warn("flood wait detected", slog.Int("seconds", seconds))
+				logger.Warn("flood wait detected", slog.Int("seconds", int(seconds)))
 
 				// به اندازه ای که تلگرام دستور داده صبر کن (مثلاً ۲ ثانیه)
 				time.Sleep(time.Duration(seconds) * time.Second)
