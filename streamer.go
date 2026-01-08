@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 func handleFileStream(ctx context.Context, w http.ResponseWriter, api *tg.Client, location tg.InputFileLocationClass, size int64) {
@@ -25,21 +27,31 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, api *tg.Client
 			Offset:   int64(offset),
 			Limit:    chunkSize,
 		})
+
 		if err != nil {
-			logger.Error("upload.getfile.error", slog.Int64("offset", offset), slog.String("err", err.Error()))
+			// چک کردن اینکه آیا ارور از نوع FLOOD_WAIT است یا خیر
+			if seconds, ok := tgerr.AsFloodWait(err); ok {
+				logger.Warn("flood wait detected", slog.Int("seconds", seconds))
+
+				// به اندازه ای که تلگرام دستور داده صبر کن (مثلاً ۲ ثانیه)
+				time.Sleep(time.Duration(seconds) * time.Second)
+				continue // دوباره همان چانک قبلی را درخواست بده
+			}
+
+			logger.Error("upload.getfile.error", slog.String("err", err.Error()))
 			return
 		}
 
 		if chunk, ok := res.(*tg.UploadFile); ok {
 			_, err := w.Write(chunk.Bytes)
 			if err != nil {
-				logger.Error("response.write.error", slog.Int64("offset", offset), slog.String("err", err.Error()))
-				return
+				return // قطع اتصال از سمت کاربر
 			}
 			offset += int64(len(chunk.Bytes))
-			logger.Info("stream.chunk", slog.Int64("offset", offset), slog.Int("size", len(chunk.Bytes)))
+
+			// یک استراحت بسیار کوتاه برای اینکه تلگرام شک نکند
+			time.Sleep(10 * time.Millisecond)
 		} else {
-			logger.Error("upload.getfile.unexpected_response", slog.Int64("offset", offset))
 			break
 		}
 	}
