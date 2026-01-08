@@ -62,15 +62,12 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Reques
 
 	for offset <= endOffset {
 		// محاسبه دقیق مقدار دیتای باقی‌مانده برای این چانک
-		currentLimit := chunkSize
-		if offset+int64(currentLimit) > endOffset {
-			currentLimit = int(endOffset - offset + 1)
-		}
+		
 
 		res, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
 			Location: location,
 			Offset:   offset,
-			Limit:    currentLimit,
+			Limit:    chunkSize,
 		})
 
 		if err != nil {
