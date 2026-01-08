@@ -58,7 +58,7 @@ func main() {
 		// ۱. چک کردن کش
 		if loc, size, found := getCachedLocation(msgID); found {
 			logger.Info("cache.hit", slog.Int("msg", msgID), slog.Int64("size", size))
-			handleFileStream(r.Context(), w, pool.GetNext(), loc, size)
+			handleFileStream(r.Context(), w, r, pool.GetNext(), loc, size)
 			return
 		}
 		logger.Info("cache.miss", slog.Int("msg", msgID))
@@ -104,9 +104,7 @@ func main() {
 		}
 		setCachedLocation(msgID, loc, size)
 		logger.Info("start.streaming", slog.Int("msg", msgID), slog.Int64("size", size), slog.String("to", clientIP))
-		handleFileStream(r.Context(), w, api, loc, size)
-		logger.Info("start.streaming", slog.Int("msg", msgID), slog.Int64("size", size), slog.String("to", clientIP))
-		handleFileStream(r.Context(), w, api, loc, size)
+		handleFileStream(r.Context(), w, r, api, loc, size)
 	})
 
 	// client IP helper is defined at package level

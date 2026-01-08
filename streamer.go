@@ -11,13 +11,18 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
-func handleFileStream(ctx context.Context, w http.ResponseWriter, api *tg.Client, location tg.InputFileLocationClass, size int64) {
+func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Request, api *tg.Client, location tg.InputFileLocationClass, size int64) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	logger.Info("stream.started", slog.Int64("size", size))
 
+// ۲. اگر درخواست از نوع HEAD بود، همین‌جا کار را تمام کن
+	if r.Method == http.MethodHead {
+		logger.Info("head request handled")
+		return 
+	}
 	const chunkSize = 1024 * 1024 // 1MB
 	offset := int64(0)
 
