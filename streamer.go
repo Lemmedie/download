@@ -75,11 +75,20 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Reques
 
 		if err != nil {
 			if seconds, ok := tgerr.AsFloodWait(err); ok {
-				logger.Warn("flood wait detected", slog.Int("seconds", int(seconds)))
-				time.Sleep(time.Duration(seconds) * time.Second)
-				continue
-			}
+				// اگر عدد خیلی بزرگ است (مثلاً بیشتر از ۱ میلیون)، یعنی نانوثانیه است
+				waitDuration := time.Duration(seconds)
+				if seconds > 1000000 {
+					// مستقیم از خودش استفاده کن چون خودش Duration است
+					logger.Warn("flood wait detected (nano)", slog.Any("duration", waitDuration))
+				} else {
+					// اگر عدد کوچک بود، یعنی واقعاً ثانیه است
+					waitDuration = time.Duration(seconds) * time.Second
+					logger.Warn("flood wait detected (sec)", slog.Int("seconds", int(seconds)))
+				}
 
+				time.Sleep(waitDuration)
+				continue 
+			}
 			// اگر کاربر وسط دانلود صفحه را بست، بیخودی ارور لاگ نکن
 			if errors.Is(err, context.Canceled) {
 				return
