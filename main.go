@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,12 +15,10 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// BotClient ساختار بات‌ها
 type BotClient struct {
 	API   *tg.Client
 	BotID int64
 }
-
 
 func main() {
 	_ = godotenv.Load()
@@ -30,13 +27,12 @@ func main() {
 	tokens := strings.Split(os.Getenv("BOT_TOKENS"), ",")
 	channelID, _ := strconv.ParseInt(os.Getenv("CHANNEL_ID"), 10, 64)
 
-	// Context اصلی برای مدیریت کل برنامه
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
 	pool, err := NewBotPool(ctx, apiID, apiHash, tokens)
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create bot pool: %v", err))
+		panic(err)
 	}
 
 	var botClients []BotClient
@@ -48,117 +44,67 @@ func main() {
 		}
 	}
 
-	// استارت اولیه بات‌ها برای اطمینان از دسترسی
-	for _, bc := range botClients {
-		go func(bot BotClient) {
-			acc, err := ensureChannelAccess(ctx, bot.API, bot.BotID, channelID)
-			if err == nil {
-				logger.Info("Bot ready", slog.Int64("bot_id", bot.BotID), slog.Uint64("channel_access_hash", acc))
-			}
-		}(bc)
-	}
-
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("id"))
-		// توزیع بار روی بات‌ها به صورت چرخشی/رندوم
-		targetBot := botClients[time.Now().UnixNano()%int64(len(botClients))]
 
-		// ایجاد یک Context مستقل برای عملیات Fetch اولیه (جلوگیری از قطع شدن با r.Context)
-		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer fetchCancel()
+		// حداکثر ۳ بار تلاش با ربات‌های مختلف
+		for attempt := 0; attempt < 3; attempt++ {
+			// انتخاب ربات (با هر بار تکرار یک ربات جدید انتخاب می‌شود)
+			targetBot := botClients[(int(time.Now().UnixNano())+attempt)%len(botClients)]
 
-		for attempt := 1; attempt <= 2; attempt++ {
-			// ۱. دریافت دسترسی کانال (برای متد GetMessages)
-			channelAccess, err := ensureChannelAccess(fetchCtx, targetBot.API, targetBot.BotID, channelID)
+			access, err := ensureChannelAccess(r.Context(), targetBot.API, targetBot.BotID, channelID)
 			if err != nil {
-				logger.Error("Channel access failed", slog.Int64("bot", targetBot.BotID), slog.Any("err", err))
-				http.Error(w, "Internal Server Error (Access)", 500)
-				return
+				continue
 			}
 
-			// ۲. بررسی کش (بازیابی لوکیشن و هش فایل)
 			cachedLoc, cachedSize, found := getCachedLocation(msgID, targetBot.BotID)
 			var loc *tg.InputDocumentFileLocation
 			var size int64
-			isFromCache := found
 
 			if found {
-				loc = &tg.InputDocumentFileLocation{
-					ID:            cachedLoc.ID,
-					AccessHash:    cachedLoc.AccessHash, // هش اختصاصی فایل
-					FileReference: cachedLoc.FileReference,
-				}
+				loc = cachedLoc
 				size = cachedSize
 			} else {
-				// ۳. واکشی مستقیم از تلگرام
-				res, err := targetBot.API.ChannelsGetMessages(fetchCtx, &tg.ChannelsGetMessagesRequest{
-					Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(channelAccess)},
+				res, err := targetBot.API.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
+					Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(access)},
 					ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
 				})
 				if err != nil {
-					logger.Error("Telegram fetch error", slog.Int("msg_id", msgID), slog.Any("err", err))
-					http.Error(w, "Error fetching from Telegram", 502)
-					return
+					continue
 				}
-
 				doc, s, err := extractDocumentFromResponse(res)
 				if err != nil {
-					logger.Warn("Media not found", slog.Int("msg_id", msgID))
-					http.Error(w, "File not found", 404)
-					return
+					continue
 				}
-
 				size = s
-				loc = &tg.InputDocumentFileLocation{
-					ID:            doc.ID,
-					AccessHash:    doc.AccessHash, // استفاده از هشِ فایل
-					FileReference: doc.FileReference,
-				}
-				logger.Info("Metadata fetched", slog.Int("msg", msgID), slog.Int64("bot", targetBot.BotID))
+				loc = &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: doc.AccessHash, FileReference: doc.FileReference}
+				setCachedLocation(msgID, targetBot.BotID, loc, size)
 			}
 
-			// ۴. شروع استریم واقعی داده‌ها (استفاده از r.Context برای قطع دانلود در صورت بستن کاربر)
+			// شروع استریم
 			err = handleFileStream(r.Context(), w, r, targetBot.API, loc, size)
 
 			if err != nil {
-				// اگر کلاینت اتصال را قطع کرد
+				// اگر Flood بود یا رفرنس منقضی شده بود، کش را پاک کن و برو سراغ ربات بعدی
+				if strings.Contains(err.Error(), "FLOOD_WAIT") || strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
+					logger.Warn("Worker failed, switching...", slog.Int64("bot", targetBot.BotID), slog.String("reason", err.Error()))
+					deleteCachedLocation(msgID, targetBot.BotID)
+					continue // انتخاب ربات بعدی در تکرار بعدی حلقه for
+				}
 				if errors.Is(err, context.Canceled) {
-					logger.Info("Client disconnected during stream", slog.Int("msg", msgID))
 					return
 				}
-
-				// اگر رفرنس منقضی شده بود، کش را پاک و دوباره تلاش کن
-				if strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
-					logger.Warn("File reference expired, retrying...", slog.Int("msg", msgID))
-					deleteCachedLocation(msgID, targetBot.BotID)
-					if attempt < 2 {
-						continue
-					}
-				}
-
-				logger.Error("Stream error", slog.String("err", err.Error()))
 				return
 			}
-
-			// ۵. ذخیره در کش در صورت موفقیت اولین استریم
-			if !isFromCache {
-				setCachedLocation(msgID, targetBot.BotID, loc, size)
-			}
-			break
+			return // موفقیت‌آمیز بود
 		}
+		http.Error(w, "All workers are busy or flooded", 429)
 	})
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "2040"
-	}
-	logger.Info("Server is running", slog.String("port", port))
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		logger.Error("Server failed", slog.Any("err", err))
-	}
+	_ = http.ListenAndServe(":2040", nil)
 }
 
-// extractDocumentFromResponse استخراج سند از پاسخ تلگرام
+// [متد extractDocumentFromResponse بدون تغییر باقی می‌ماند]
 func extractDocumentFromResponse(res tg.MessagesMessagesClass) (*tg.Document, int64, error) {
 	var messages []tg.MessageClass
 	switch v := res.(type) {
