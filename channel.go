@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"sync"
@@ -13,73 +13,96 @@ import (
 
 var (
 	channelAccessMu sync.RWMutex
-	channelAccess   = make(map[int64]uint64)
-	cacheFile       = "channel_access_cache.json"
+	// ساختار جدید: BotID -> (ChannelID -> AccessHash)
+	channelAccess = make(map[int64]map[int64]uint64)
+	cacheFile     = "channel_access_cache.json"
 )
 
 func init() {
 	loadChannelCache()
 }
 
+// loadChannelCache بارگذاری هش‌ها با ساختار جدید
 func loadChannelCache() {
 	b, err := os.ReadFile(cacheFile)
 	if err != nil {
 		return
 	}
-	var m map[string]uint64
-	if err := json.Unmarshal(b, &m); err == nil {
+
+	// تبدیل آیدی‌های رشته‌ای JSON به int64
+	var rawMap map[string]map[string]uint64
+	if err := json.Unmarshal(b, &rawMap); err == nil {
 		channelAccessMu.Lock()
-		for k, v := range m {
-			if id, err := strconv.ParseInt(k, 10, 64); err == nil {
-				channelAccess[id] = v
+		for bIDStr, channels := range rawMap {
+			bID, _ := strconv.ParseInt(bIDStr, 10, 64)
+			if channelAccess[bID] == nil {
+				channelAccess[bID] = make(map[int64]uint64)
+			}
+			for cIDStr, hash := range channels {
+				cID, _ := strconv.ParseInt(cIDStr, 10, 64)
+				channelAccess[bID][cID] = hash
 			}
 		}
 		channelAccessMu.Unlock()
 	}
 }
 
+// saveChannelCache ذخیره هش‌ها به صورت تفکیک شده
 func saveChannelCache() {
 	channelAccessMu.RLock()
 	defer channelAccessMu.RUnlock()
-	b, _ := json.MarshalIndent(channelAccess, "", "  ")
+
+	// تبدیل مپ برای ذخیره‌سازی تمیز در JSON
+	serializable := make(map[string]map[string]uint64)
+	for bID, channels := range channelAccess {
+		serializable[strconv.FormatInt(bID, 10)] = make(map[string]uint64)
+		for cID, hash := range channels {
+			serializable[strconv.FormatInt(bID, 10)][strconv.FormatInt(cID, 10)] = hash
+		}
+	}
+
+	b, _ := json.MarshalIndent(serializable, "", "  ")
 	_ = os.WriteFile(cacheFile, b, 0600)
 }
 
-// ensureChannelAccess: تنها راه قانونی و بدون ارور برای گرفتن هش
-func ensureChannelAccess(ctx context.Context, api *tg.Client, channelID int64) (uint64, error) {
-	// ۱. چک کردن حافظه (بسیار سریع)
+// ensureChannelAccess اصلاح شده برای کار با چند ربات
+func ensureChannelAccess(ctx context.Context, api *tg.Client, botID int64, channelID int64) (uint64, error) {
+	// ۱. جستجو در کش مخصوص همین ربات
 	channelAccessMu.RLock()
-	if v, ok := channelAccess[channelID]; ok {
-		channelAccessMu.RUnlock()
-		return v, nil
+	if botMap, ok := channelAccess[botID]; ok {
+		if hash, found := botMap[channelID]; found {
+			channelAccessMu.RUnlock()
+			return hash, nil
+		}
 	}
 	channelAccessMu.RUnlock()
 
-	// ۲. تلاش از طریق Username (اگر کانال یوزرنیم دارد)
-	// این متد تنها متدی است که بدون داشتن هش، اطلاعات کامل (شامل هش) را برمی‌گرداند
-
-	// ۳. تلاش از طریق لیست گفتگوها (اگر ربات عضو کانال است)
+	// ۳. تلاش ثانویه با ChannelsGetChannels
 	res, err := api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
-		&tg.InputChannel{ChannelID: channelID, AccessHash: 0}, // تست با هش صفر
+		&tg.InputChannel{ChannelID: channelID, AccessHash: 0},
 	})
 	if err == nil {
 		if chats, ok := res.(*tg.MessagesChats); ok {
 			for _, chat := range chats.Chats {
 				if ch, ok := chat.(*tg.Channel); ok && ch.ID == channelID {
 					acc := uint64(ch.AccessHash)
-					updateLocalCache(channelID, acc)
+					updateLocalCache(botID, channelID, acc)
 					return acc, nil
 				}
 			}
 		}
 	}
 
-	return 0, errors.New("channel access not found")
+	return 0, fmt.Errorf("bot %d could not obtain access hash for channel %d", botID, channelID)
 }
 
-func updateLocalCache(id int64, acc uint64) {
+// updateLocalCache آپدیت کش به تفکیک BotID
+func updateLocalCache(botID int64, channelID int64, acc uint64) {
 	channelAccessMu.Lock()
-	channelAccess[id] = acc
+	if channelAccess[botID] == nil {
+		channelAccess[botID] = make(map[int64]uint64)
+	}
+	channelAccess[botID][channelID] = acc
 	channelAccessMu.Unlock()
 	saveChannelCache()
 }
