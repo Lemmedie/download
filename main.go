@@ -22,7 +22,6 @@ type BotClient struct {
 	BotID int64
 }
 
-var logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 func main() {
 	_ = godotenv.Load()
