@@ -57,8 +57,11 @@ func main() {
 		handleFileStream(r.Context(), w, api, loc, size)
 	})
 
-	log.Println("Server ready on :8080")
-	http.ListenAndServe(":8080", nil)
+	log.Println("Server ready on localhost:8080")
+	err := http.ListenAndServe("127.0.0.1:8080", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 // extractDocumentFromResponse inspects the response from ChannelsGetMessages and returns
