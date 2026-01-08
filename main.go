@@ -65,25 +65,8 @@ func main() {
 				http.Error(w, "Access error", 500)
 				return
 			}
-			_, testErr := targetBot.API.MessagesSendMessage(r.Context(), &tg.MessagesSendMessageRequest{
-				Peer: &tg.InputPeerChannel{
-					ChannelID:  channelID,
-					AccessHash: int64(access),
-				},
-				Message:  fmt.Sprintf("Test access from Bot: %d", targetBot.BotID),
-				RandomID: int64(time.Now().UnixNano()), // برای جلوگیری از پیام تکراری
-			})
 
-			if testErr != nil {
-				logger.Error("access_hash.invalid",
-					slog.Int64("bot", targetBot.BotID),
-					slog.String("err", testErr.Error()))
-				http.Error(w, "Access Hash Verification Failed", 500)
-				return
-			}
-			logger.Info("access_hash.verified", slog.Int64("bot", targetBot.BotID))
 			cachedLoc, cachedSize, found := getCachedLocation(msgID, targetBot.BotID)
-			logger.Info("stream.request", slog.Int("msg", msgID), slog.Int64("bot", targetBot.BotID), slog.Bool("cache_hit", found))
 			var loc *tg.InputDocumentFileLocation
 			var size int64
 
@@ -109,6 +92,8 @@ func main() {
 					return
 				}
 				size = s
+				logger.Info("fetched.from.telegram", slog.Int("msg", msgID), slog.Int64("bot", targetBot.BotID))
+
 				loc = &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: int64(access), FileReference: doc.FileReference}
 				setCachedLocation(msgID, targetBot.BotID, loc, size)
 			}
