@@ -49,9 +49,9 @@ func setCachedLocation(msgID int, botID int64, loc *tg.InputDocumentFileLocation
 	fileCache[key] = CachedFile{
 		Location: loc,
 		Size:     size,
-		Expires:  time.Now().Add(3 * time.Hour),
+		Expires:  time.Now().Add(15 * time.Minute),
 	}
-	logger.Info("cache.set", slog.String("key", key))
+	logger.Info("cache.set", slog.String("key", key), slog.Int64("size", size), slog.String("expires", fileCache[key].Expires.Format(time.RFC3339)))
 }
 
 func deleteCachedLocation(msgID int, botID int64) {

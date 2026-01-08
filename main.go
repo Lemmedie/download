@@ -58,8 +58,8 @@ func main() {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("id"))
 		targetBot := botClients[time.Now().UnixNano()%int64(len(botClients))]
 
-		// گلوله حقیقت: حداکثر ۲ تلاش برای مقابله با انقضای فایل
-		for attempt := 1; attempt <= 1; attempt++ {
+		// حداکثر ۲ تلاش برای مقابله با انقضای فایل
+		for attempt := 1; attempt <= 2; attempt++ {
 			access, err := ensureChannelAccess(r.Context(), targetBot.API, targetBot.BotID, channelID)
 			if err != nil {
 				http.Error(w, "Access error", 500)
@@ -67,6 +67,7 @@ func main() {
 			}
 
 			cachedLoc, cachedSize, found := getCachedLocation(msgID, targetBot.BotID)
+			cached := found
 			var loc *tg.InputDocumentFileLocation
 			var size int64
 
@@ -93,9 +94,9 @@ func main() {
 				}
 				size = s
 				logger.Info("fetched.from.telegram", slog.Int("msg", msgID), slog.Int64("bot", targetBot.BotID))
-
+				logger.Info("ACCESS HASH IS OK", slog.Int64("access", int64(access)))
 				loc = &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: int64(access), FileReference: doc.FileReference}
-				setCachedLocation(msgID, targetBot.BotID, loc, size)
+				// DO NOT cache yet — only after a successful stream
 			}
 
 			// تلاش برای استریم
@@ -104,7 +105,7 @@ func main() {
 			if err != nil {
 				// چک کردن خطای انقضای رفرنس
 				if strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
-					logger.Warn("expired_ref_detected. clearing_cache_and_retrying", slog.Int("msg", msgID), slog.Int("attempt", attempt))
+					logger.Warn("expired_ref_detected. clearing_cache_and_retrying", slog.Int("msg", msgID), slog.Int("attempt", attempt), slog.Int64("bot", targetBot.BotID), slog.Int64("access", int64(access)), slog.Int64("loc_id", loc.ID))
 					deleteCachedLocation(msgID, targetBot.BotID)
 					if attempt < 2 {
 						continue
@@ -112,6 +113,10 @@ func main() {
 				}
 				logger.Error("stream.error", slog.String("err", err.Error()))
 				return
+			}
+			// successful stream — cache only if we fetched doc this attempt
+			if !cached {
+				setCachedLocation(msgID, targetBot.BotID, loc, size)
 			}
 			break // خروج از حلقه در صورت موفقیت
 		}
