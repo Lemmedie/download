@@ -163,5 +163,42 @@ func ensureChannelAccess(ctx context.Context, api *tg.Client, channelID int64) (
 			}
 		}
 	}
+	// As a last resort try to fetch channel info directly which may return AccessHash
+	// This does not require CHANNEL_USERNAME; some servers allow fetching channel via ID
+	if c := api; c != nil {
+		if name, acc, err := getChannelName(ctx, c, channelID); err == nil {
+			channelAccessMu.Lock()
+			channelAccess[channelID] = uint64(acc)
+			channelAccessMu.Unlock()
+			saveChannelCache()
+			logger.Info("channel.access.fetched", slog.Int64("channel", channelID), slog.Uint64("access", uint64(acc)), slog.String("username", name))
+			return uint64(acc), nil
+		} else {
+			logger.Error("channel.fetch.error", slog.Int64("channel", channelID), slog.String("err", err.Error()))
+		}
+	}
+
+	// No access found
+
 	return 0, errors.New("channel access hash not found; set CHANNEL_ACCESS_HASH or CHANNEL_USERNAME")
+}
+
+// getChannelName tries to retrieve channel info (username and access hash) by channel ID
+func getChannelName(ctx context.Context, client *tg.Client, channelID int64) (string, int64, error) {
+	inputChannel := &tg.InputChannel{
+		ChannelID:  channelID,
+		AccessHash: 0,
+	}
+	channels, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{inputChannel})
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to fetch channel: %w", err)
+	}
+	// channels.GetChats may exist
+	if chs := channels.GetChats(); len(chs) == 0 {
+		return "", 0, fmt.Errorf("no channels found")
+	}
+	if ch, ok := chs[0].(*tg.Channel); ok {
+		return ch.Username, ch.AccessHash, nil
+	}
+	return "", 0, fmt.Errorf("unexpected channel type")
 }

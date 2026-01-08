@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -115,11 +114,25 @@ func main() {
 	}
 	logger.Info("server.ready", slog.String("addr", bindAddr))
 
-	err := http.ListenAndServe(bindAddr, nil)
-	if err != nil {
-		logger.Error("server.listen.error", slog.String("err", err.Error()))
-		log.Fatal(err)
+	server := &http.Server{Addr: bindAddr, Handler: nil}
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("server.listen.error", slog.String("err", err.Error()))
+		}
+	}()
+
+	// Wait for shutdown signal (Ctrl+C)
+	<-ctx.Done()
+	logger.Info("shutdown.initiated")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("server.shutdown.error", slog.String("err", err.Error()))
 	}
+	// persist channel cache on shutdown
+	saveChannelCache()
+	logger.Info("shutdown.complete")
+	return
 }
 
 // getClientIP returns the best-effort remote IP and a simple range (/24 or /64)
