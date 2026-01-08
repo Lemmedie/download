@@ -16,8 +16,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var logger = slog.Default()
-
 type BotClient struct {
 	API   *tg.Client
 	BotID int64
