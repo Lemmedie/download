@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -88,15 +88,23 @@ func main() {
 		}
 
 		// استخراج لوکیشن از پاسخ
-		loc, size, ok := extractDocumentFromResponse(res)
-		if !ok || loc == nil {
+		doc, size, err := extractDocumentFromResponse(res)
+		if err != nil || doc == nil {
+			logger.Info("no.document", slog.Int("msg", msgID), slog.String("err", err.Error()))
 			logger.Info("no.document", slog.Int("msg", msgID))
 			http.Error(w, "file not found in message", http.StatusNotFound)
 			return
 		}
 
 		logger.Info("document.found", slog.Int("msg", msgID), slog.Int64("size", size))
+		loc := &tg.InputDocumentFileLocation{
+			ID:            doc.ID,
+			AccessHash:    doc.AccessHash,
+			FileReference: doc.FileReference,
+		}
 		setCachedLocation(msgID, loc, size)
+		logger.Info("start.streaming", slog.Int("msg", msgID), slog.Int64("size", size), slog.String("to", clientIP))
+		handleFileStream(r.Context(), w, api, loc, size)
 		logger.Info("start.streaming", slog.Int("msg", msgID), slog.Int64("size", size), slog.String("to", clientIP))
 		handleFileStream(r.Context(), w, api, loc, size)
 	})
@@ -176,139 +184,45 @@ func getClientIP(r *http.Request) (string, string) {
 // an InputDocumentFileLocation and its size if a document is found in any message.
 // This implementation uses reflection to avoid depending on concrete generated tg types
 // which may vary between versions.
-func extractDocumentFromResponse(res interface{}) (*tg.InputDocumentFileLocation, int64, bool) {
-	if res == nil {
-		return nil, 0, false
+func extractDocumentFromResponse(res tg.MessagesMessagesClass) (*tg.Document, int64, error) {
+	// ۱. تبدیل اینترفیس به ساختار واقعی (Type Assertion)
+	var messages []tg.MessageClass
+
+	switch v := res.(type) {
+	case *tg.MessagesMessages:
+		messages = v.Messages
+	case *tg.MessagesMessagesSlice:
+		messages = v.Messages
+	case *tg.MessagesChannelMessages:
+		messages = v.Messages
+	default:
+		return nil, 0, fmt.Errorf("unexpected response type: %T", res)
 	}
 
-	rv := reflect.ValueOf(res)
-	if !rv.IsValid() {
-		return nil, 0, false
-	}
-	rv = reflect.Indirect(rv)
-
-	var iter reflect.Value
-	// If the value itself is a slice of messages, iterate directly
-	if rv.Kind() == reflect.Slice {
-		iter = rv
-	} else {
-		// Otherwise try to get a field named "Messages"
-		f := rv.FieldByName("Messages")
-		if !f.IsValid() || f.Kind() != reflect.Slice {
-			return nil, 0, false
-		}
-		iter = f
+	if len(messages) == 0 {
+		return nil, 0, errors.New("no messages in response")
 	}
 
-	for i := 0; i < iter.Len(); i++ {
-		item := iter.Index(i)
-		item = reflect.Indirect(item)
-		if !item.IsValid() {
-			continue
-		}
-
-		media := item.FieldByName("Media")
-		if !media.IsValid() {
-			continue
-		}
-		media = reflect.Indirect(media)
-		if !media.IsValid() {
-			continue
-		}
-
-		doc := media.FieldByName("Document")
-		if !doc.IsValid() {
-			continue
-		}
-		doc = reflect.Indirect(doc)
-		if !doc.IsValid() {
-			continue
-		}
-
-		// helpers to find fields in doc
-		findField := func(names ...string) (reflect.Value, bool) {
-			for _, n := range names {
-				f := doc.FieldByName(n)
-				if f.IsValid() {
-					return f, true
-				}
-			}
-			return reflect.Value{}, false
-		}
-
-		// id
-		var id uint64
-		if fv, ok := findField("ID", "Id", "DocumentID", "DocumentId"); ok {
-			switch fv.Kind() {
-			case reflect.Int, reflect.Int32, reflect.Int64:
-				id = uint64(fv.Int())
-			case reflect.Uint, reflect.Uint32, reflect.Uint64:
-				id = fv.Uint()
-			}
-		} else {
-			continue
-		}
-
-		// access hash
-		var accessHash uint64
-		if fv, ok := findField("AccessHash", "Accesshash", "Access_Hash"); ok {
-			switch fv.Kind() {
-			case reflect.Int, reflect.Int32, reflect.Int64:
-				accessHash = uint64(fv.Int())
-			case reflect.Uint, reflect.Uint32, reflect.Uint64:
-				accessHash = fv.Uint()
-			}
-		} else {
-			continue
-		}
-
-		// file reference (optional)
-		var fileRef []byte
-		if fv, ok := findField("FileReference", "FileRef", "File_reference"); ok {
-			if fv.Kind() == reflect.Slice && fv.Type().Elem().Kind() == reflect.Uint8 {
-				fileRef = fv.Bytes()
-			}
-		}
-
-		// size (optional)
-		var size int64
-		if fv, ok := findField("Size", "FileSize"); ok {
-			switch fv.Kind() {
-			case reflect.Int, reflect.Int32, reflect.Int64:
-				size = fv.Int()
-			case reflect.Uint, reflect.Uint32, reflect.Uint64:
-				size = int64(fv.Uint())
-			}
-		}
-
-		// build InputDocumentFileLocation using reflection to avoid direct field type assumptions
-		locType := reflect.TypeOf(tg.InputDocumentFileLocation{})
-		locVal := reflect.New(locType).Elem()
-		if f := locVal.FieldByName("ID"); f.IsValid() && f.CanSet() {
-			switch f.Kind() {
-			case reflect.Int, reflect.Int32, reflect.Int64:
-				f.SetInt(int64(id))
-			case reflect.Uint, reflect.Uint32, reflect.Uint64:
-				f.SetUint(id)
-			}
-		}
-		if f := locVal.FieldByName("AccessHash"); f.IsValid() && f.CanSet() {
-			switch f.Kind() {
-			case reflect.Int, reflect.Int32, reflect.Int64:
-				f.SetInt(int64(accessHash))
-			case reflect.Uint, reflect.Uint32, reflect.Uint64:
-				f.SetUint(accessHash)
-			}
-		}
-		if f := locVal.FieldByName("FileReference"); f.IsValid() && f.CanSet() {
-			if f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.Uint8 {
-				f.SetBytes(fileRef)
-			}
-		}
-
-		loc := locVal.Addr().Interface().(*tg.InputDocumentFileLocation)
-		return loc, size, true
+	// ۲. استخراج مدیا از اولین پیام
+	msg, ok := messages[0].(*tg.Message)
+	if !ok {
+		return nil, 0, errors.New("message is not a regular message (maybe service message?)")
 	}
 
-	return nil, 0, false
+	if msg.Media == nil {
+		return nil, 0, errors.New("message has no media")
+	}
+
+	// ۳. چک کردن اینکه آیا مدیا واقعاً یک فایل (Document) است
+	mediaDoc, ok := msg.Media.(*tg.MessageMediaDocument)
+	if !ok {
+		return nil, 0, errors.New("media is not a document (maybe photo or poll?)")
+	}
+
+	document, ok := mediaDoc.Document.(*tg.Document)
+	if !ok {
+		return nil, 0, errors.New("document metadata not found")
+	}
+
+	return document, document.Size, nil
 }
