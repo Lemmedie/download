@@ -60,7 +60,10 @@ func ensureChannelAccess(ctx context.Context, api *tg.Client, channelID int64) (
 	// این متد تنها متدی است که بدون داشتن هش، اطلاعات کامل (شامل هش) را برمی‌گرداند
 
 	// ۳. تلاش از طریق لیست گفتگوها (اگر ربات عضو کانال است)
-	res, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{Limit: 100})
+	res, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		OffsetPeer: &tg.InputPeerEmpty{}, // این خط ارور شما را حل می‌کند
+		Limit:      100,
+	})
 	if err != nil {
 		logger.Error("failed to get dialogs", slog.String("err", err.Error()))
 	} else {
