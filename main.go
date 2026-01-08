@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gotd/td/tg"
 	"github.com/joho/godotenv"
@@ -32,30 +34,40 @@ func main() {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("id"))
 
 		clientIP, ipRange := getClientIP(r)
-		log.Printf("Incoming request: %s %s id=%d from=%s range=%s", r.Method, r.URL.Path, msgID, clientIP, ipRange)
+		// ensure we have a request id
+		rid := r.Header.Get("X-Request-ID")
+		if rid == "" {
+			rid = generateRequestID()
+			r.Header.Set("X-Request-ID", rid)
+		}
+		start := time.Now()
+		defer func() {
+			logger.Info("request.finished", slog.String("request_id", rid), slog.Int("msg_id", msgID), slog.Duration("duration", time.Since(start)))
+		}()
+		logger.Info("request.incoming", slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Int("msg_id", msgID), slog.String("request_id", rid), slog.String("client_ip", clientIP), slog.String("ip_range", ipRange))
 
 		// ۱. چک کردن کش
 		if loc, size, found := getCachedLocation(msgID); found {
-			log.Printf("Cache hit for msg=%d size=%d", msgID, size)
+			logger.Info("cache.hit", slog.Int("msg", msgID), slog.Int64("size", size))
 			handleFileStream(r.Context(), w, pool.GetNext(), loc, size)
 			return
 		}
-		log.Printf("Cache miss for msg=%d", msgID)
+		logger.Info("cache.miss", slog.Int("msg", msgID))
 
 		// ۲. پیدا کردن فایل (اگر در کش نبود)
 		api := pool.GetNext()
 		if api == nil {
-			log.Printf("no available bot clients to handle request for msg=%d", msgID)
+			logger.Error("no bot clients available", slog.Int("msg", msgID))
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		log.Printf("Fetching msg=%d from channel=%d", msgID, channelID)
+		logger.Info("fetching.message", slog.Int("msg", msgID), slog.Int64("channel", channelID))
 		res, err := api.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
 			Channel: &tg.InputChannel{ChannelID: channelID},
 			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
 		})
 		if err != nil {
-			log.Printf("ChannelsGetMessages error for msg=%d: %v", msgID, err)
+			logger.Error("ChannelsGetMessages.error", slog.Int("msg", msgID), slog.String("err", err.Error()))
 			http.Error(w, "error fetching message", http.StatusInternalServerError)
 			return
 		}
