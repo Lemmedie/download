@@ -100,7 +100,7 @@ func main() {
 			}
 
 			// تلاش برای استریم
-			err = handleFileStream(r.Context(), w, r, targetBot.API, targetBot.BotID, access, loc, size)
+			err = handleFileStream(r.Context(), w, r, targetBot.API, access, loc, size)
 
 			if err != nil {
 				// چک کردن خطای انقضای رفرنس

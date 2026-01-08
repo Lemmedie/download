@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,7 +13,8 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
-func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Request, api *tg.Client, botID int64, accessHash uint64, location *tg.InputDocumentFileLocation, size int64) error {
+func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Request, api *tg.Client, accessHash uint64, location *tg.InputDocumentFileLocation, size int64) error {
+
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", "application/octet-stream")
 
@@ -34,6 +36,7 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startOffset, endOffset, size))
 		w.Header().Set("Content-Length", strconv.FormatInt(endOffset-startOffset+1, 10))
 		w.WriteHeader(http.StatusPartialContent)
+
 	} else {
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	}
@@ -45,7 +48,7 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	loc := &tg.InputDocumentFileLocation{
 		ID: location.ID, AccessHash: int64(accessHash), FileReference: location.FileReference,
 	}
-
+	logger.Info("File Reference used", slog.Int64("id", loc.ID), slog.Int64("access_hash", loc.AccessHash), slog.Any("file_reference", string(loc.FileReference)))
 	const chunkSize = 1024 * 1024
 	offset := startOffset
 	for offset <= endOffset {
