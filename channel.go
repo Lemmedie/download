@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"reflect"
@@ -96,51 +97,64 @@ func ensureChannelAccess(ctx context.Context, api *tg.Client, channelID int64) (
 		res, err := api.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: username})
 		if err == nil && res != nil {
 			// Search chats for channel with matching ID
-			// Use reflection similar to other helpers
+			// Use reflection similar to other helpers, but be defensive about kinds
 			rv := reflect.ValueOf(res)
 			if rv.IsValid() {
-				rv = reflect.Indirect(rv)
-				f := rv.FieldByName("Chats")
-				if f.IsValid() && f.Kind() == reflect.Slice {
-					for i := 0; i < f.Len(); i++ {
-						ch := reflect.Indirect(f.Index(i))
-						if !ch.IsValid() {
-							continue
-						}
-						// find ID and AccessHash
-						idF := ch.FieldByName("ID")
-						if !idF.IsValid() {
-							idF = ch.FieldByName("Id")
-						}
-						accF := ch.FieldByName("AccessHash")
-						if !idF.IsValid() || !accF.IsValid() {
-							continue
-						}
-						var id int64
-						switch idF.Kind() {
-						case reflect.Int, reflect.Int32, reflect.Int64:
-							id = idF.Int()
-						case reflect.Uint, reflect.Uint32, reflect.Uint64:
-							id = int64(idF.Uint())
-						}
-						if id == channelID {
-							var acc uint64
-							switch accF.Kind() {
-							case reflect.Int, reflect.Int32, reflect.Int64:
-								acc = uint64(accF.Int())
-							case reflect.Uint, reflect.Uint32, reflect.Uint64:
-								acc = accF.Uint()
+				// unwrap pointers and interfaces
+				for rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
+					rv = rv.Elem()
+					if !rv.IsValid() {
+						break
+					}
+				}
+				if rv.IsValid() && rv.Kind() == reflect.Struct {
+					f := rv.FieldByName("Chats")
+					if f.IsValid() && f.Kind() == reflect.Slice {
+						for i := 0; i < f.Len(); i++ {
+							ch := f.Index(i)
+							if ch.Kind() == reflect.Interface || ch.Kind() == reflect.Ptr {
+								ch = ch.Elem()
 							}
-							if acc != 0 {
-								channelAccessMu.Lock()
-								channelAccess[channelID] = acc
-								channelAccessMu.Unlock()
-								saveChannelCache()
-								logger.Info("channel.access.resolved", slog.Int64("channel", channelID), slog.Uint64("access", acc))
-								return acc, nil
+							if !ch.IsValid() || ch.Kind() != reflect.Struct {
+								continue
+							}
+							// find ID and AccessHash
+							idF := ch.FieldByName("ID")
+							if !idF.IsValid() {
+								idF = ch.FieldByName("Id")
+							}
+							accF := ch.FieldByName("AccessHash")
+							if !idF.IsValid() || !accF.IsValid() {
+								continue
+							}
+							var id int64
+							switch idF.Kind() {
+							case reflect.Int, reflect.Int32, reflect.Int64:
+								id = idF.Int()
+							case reflect.Uint, reflect.Uint32, reflect.Uint64:
+								id = int64(idF.Uint())
+							}
+							if id == channelID {
+								var acc uint64
+								switch accF.Kind() {
+								case reflect.Int, reflect.Int32, reflect.Int64:
+									acc = uint64(accF.Int())
+								case reflect.Uint, reflect.Uint32, reflect.Uint64:
+									acc = accF.Uint()
+								}
+								if acc != 0 {
+									channelAccessMu.Lock()
+									channelAccess[channelID] = acc
+									channelAccessMu.Unlock()
+									saveChannelCache()
+									logger.Info("channel.access.resolved", slog.Int64("channel", channelID), slog.Uint64("access", acc))
+									return acc, nil
+								}
 							}
 						}
 					}
+				} else {
+					logger.Error("resolve.username.unexpected_type", slog.String("type", fmt.Sprintf("%T", res)))
 				}
 			}
 			// Fallthrough to error
