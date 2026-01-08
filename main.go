@@ -88,7 +88,7 @@ func main() {
 				// اگر Flood بود یا رفرنس منقضی شده بود، کش را پاک کن و برو سراغ ربات بعدی
 				if strings.Contains(err.Error(), "FLOOD_WAIT") || strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
 					logger.Warn("Worker failed, switching...", slog.Int64("bot", targetBot.BotID), slog.String("reason", err.Error()))
-					deleteCachedLocation(msgID, targetBot.BotID)
+					//deleteCachedLocation(msgID, targetBot.BotID)
 					continue // انتخاب ربات بعدی در تکرار بعدی حلقه for
 				}
 				if errors.Is(err, context.Canceled) {
