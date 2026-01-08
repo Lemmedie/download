@@ -13,13 +13,15 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
-func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Request, api *tg.Client, accessHash uint64, location *tg.InputDocumentFileLocation, size int64) error {
+// پارامتر accessHash حذف شد چون در خودِ location موجود است
+func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Request, api *tg.Client, location *tg.InputDocumentFileLocation, size int64) error {
 
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", "application/octet-stream")
 
 	startOffset, endOffset := int64(0), size-1
 	rangeHeader := r.Header.Get("Range")
+
 	if rangeHeader != "" && strings.HasPrefix(rangeHeader, "bytes=") {
 		parts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
 		if s, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
@@ -36,7 +38,6 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startOffset, endOffset, size))
 		w.Header().Set("Content-Length", strconv.FormatInt(endOffset-startOffset+1, 10))
 		w.WriteHeader(http.StatusPartialContent)
-
 	} else {
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	}
@@ -45,27 +46,29 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return nil
 	}
 
-	loc := &tg.InputDocumentFileLocation{
-		ID: location.ID, AccessHash: int64(accessHash), FileReference: location.FileReference,
-	}
-	logger.Info("File Reference used", slog.Int64("id", loc.ID), slog.Int64("access_hash", loc.AccessHash), slog.Any("file_reference", string(loc.FileReference)))
-	const chunkSize = 1024 * 1024
+	logger.Info("streaming.started",
+		slog.Int64("file_id", location.ID),
+		slog.Int64("offset", startOffset),
+	)
+
+	const chunkSize = 1024 * 1024 // 1MB chunks
 	offset := startOffset
+
 	for offset <= endOffset {
+		// استفاده مستقیم از پارامتر ورودی location
 		res, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
-			Location: loc, Offset: offset, Limit: chunkSize,
+			Location: location,
+			Offset:   offset,
+			Limit:    chunkSize,
 		})
 
 		if err != nil {
 			if seconds, ok := tgerr.AsFloodWait(err); ok {
-				d := time.Duration(seconds)
-				if seconds <= 1000 {
-					d *= time.Second
-				}
+				d := time.Duration(seconds) * time.Second
 				time.Sleep(d)
 				continue
 			}
-			return err // برگرداندن خطا به متد فراخوان
+			return err
 		}
 
 		if chunk, ok := res.(*tg.UploadFile); ok {
@@ -74,13 +77,17 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, r *http.Reques
 			if int64(len(data)) > remainingBytes {
 				data = data[:remainingBytes]
 			}
+
 			n, err := w.Write(data)
 			if err != nil {
+				// احتمالاً قطع اتصال توسط کاربر (Broken Pipe)
 				return err
 			}
 			offset += int64(n)
-			if offset > endOffset {
-				break
+
+			// فلاش کردن داده‌ها برای استریم روان‌تر در صورت پشتیبانی ResponseWriter
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
 			}
 		} else {
 			break

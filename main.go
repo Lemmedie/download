@@ -58,29 +58,29 @@ func main() {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("id"))
 		targetBot := botClients[time.Now().UnixNano()%int64(len(botClients))]
 
-		// حداکثر ۲ تلاش برای مقابله با انقضای فایل
 		for attempt := 1; attempt <= 2; attempt++ {
-			access, err := ensureChannelAccess(r.Context(), targetBot.API, targetBot.BotID, channelID)
+			// دسترسی به کانال برای متد GetMessages
+			channelAccess, err := ensureChannelAccess(r.Context(), targetBot.API, targetBot.BotID, channelID)
 			if err != nil {
 				http.Error(w, "Access error", 500)
 				return
 			}
 
 			cachedLoc, cachedSize, found := getCachedLocation(msgID, targetBot.BotID)
-			cached := found
 			var loc *tg.InputDocumentFileLocation
 			var size int64
+			cached := found
 
 			if found {
 				loc = &tg.InputDocumentFileLocation{
 					ID:            cachedLoc.ID,
-					AccessHash:    int64(access),
+					AccessHash:    cachedLoc.AccessHash, // استفاده از هش خود فایل از کش
 					FileReference: cachedLoc.FileReference,
 				}
 				size = cachedSize
 			} else {
 				res, err := targetBot.API.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
-					Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(access)},
+					Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(channelAccess)},
 					ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
 				})
 				if err != nil {
@@ -93,32 +93,34 @@ func main() {
 					return
 				}
 				size = s
+				// ساخت لوکیشن با استفاده از AccessHash خودِ فایل (سند)
+				loc = &tg.InputDocumentFileLocation{
+					ID:            doc.ID,
+					AccessHash:    doc.AccessHash, // هشِ فایل، نه کانال!
+					FileReference: doc.FileReference,
+				}
 				logger.Info("fetched.from.telegram", slog.Int("msg", msgID), slog.Int64("bot", targetBot.BotID))
-				logger.Info("ACCESS HASH IS OK", slog.Int64("access", int64(access)))
-				loc = &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: int64(access), FileReference: doc.FileReference}
-				// DO NOT cache yet — only after a successful stream
 			}
 
-			// تلاش برای استریم
-			err = handleFileStream(r.Context(), w, r, targetBot.API, access, loc, size)
+			// فراخوانی اصلاح شده بدون پارامتر اضافی accessHash
+			err = handleFileStream(r.Context(), w, r, targetBot.API, loc, size)
 
 			if err != nil {
-				// چک کردن خطای انقضای رفرنس
 				if strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
-					logger.Warn("expired_ref_detected. clearing_cache_and_retrying", slog.Int("msg", msgID), slog.Int("attempt", attempt), slog.Int64("bot", targetBot.BotID), slog.Int64("access", int64(access)), slog.Int64("loc_id", loc.ID))
+					logger.Warn("expired_ref_detected. clearing_cache_and_retrying", slog.Int("msg", msgID), slog.Int("attempt", attempt))
 					deleteCachedLocation(msgID, targetBot.BotID)
 					if attempt < 2 {
 						continue
-					} // تلاش دوباره
+					}
 				}
 				logger.Error("stream.error", slog.String("err", err.Error()))
 				return
 			}
-			// successful stream — cache only if we fetched doc this attempt
+
 			if !cached {
 				setCachedLocation(msgID, targetBot.BotID, loc, size)
 			}
-			break // خروج از حلقه در صورت موفقیت
+			break
 		}
 	})
 
