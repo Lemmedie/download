@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,6 +16,12 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// ساختار برای جفت کردن کلاینت و آیدی ربات
+type BotClient struct {
+	API   *tg.Client
+	BotID int64
+}
+
 func main() {
 	_ = godotenv.Load()
 	apiID, _ := strconv.Atoi(os.Getenv("API_ID"))
@@ -27,165 +32,88 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	pool, _ := NewBotPool(ctx, apiID, apiHash, tokens)
-	// Try to resolve channel access hash on startup using any available client
-	if c := pool.GetNext(); c != nil {
-		go func() {
-			if acc, err := ensureChannelAccess(ctx, c, channelID); err != nil {
-				logger.Error("channel.access.bootstrap.failed", slog.Int64("channel", channelID), slog.String("err", err.Error()))
-			} else {
-				logger.Info("channel.access.bootstrap", slog.Int64("channel", channelID), slog.Uint64("access", acc))
+	pool, err := NewBotPool(ctx, apiID, apiHash, tokens)
+	if err != nil {
+		panic(err)
+	}
+
+	// ۱. ایجاد یک لیست از BotClient ها با استفاده از توکن
+	var botClients []BotClient
+	for _, t := range tokens {
+		parts := strings.Split(t, ":")
+		if len(parts) > 0 {
+			bID, _ := strconv.ParseInt(parts[0], 10, 64)
+			botClients = append(botClients, BotClient{
+				API:   pool.GetNext(), // ترتیب کلاینت‌ها در پول با توکن‌ها یکی است
+				BotID: bID,
+			})
+		}
+	}
+
+	// ۲. Bootstrap کردن هش‌ها
+	for _, bc := range botClients {
+		go func(bot BotClient) {
+			acc, err := ensureChannelAccess(ctx, bot.API, bot.BotID, channelID)
+			if err == nil {
+				logger.Info("bot.ready", slog.Int64("id", bot.BotID), slog.Uint64("hash", acc))
 			}
-		}()
+		}(bc)
 	}
 
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("id"))
 
-		clientIP, ipRange := getClientIP(r)
-		// ensure we have a request id
-		rid := r.Header.Get("X-Request-ID")
-		if rid == "" {
-			rid = generateRequestID()
-			r.Header.Set("X-Request-ID", rid)
-		}
-		start := time.Now()
-		defer func() {
-			logger.Info("request.finished", slog.String("request_id", rid), slog.Int("msg_id", msgID), slog.Duration("duration", time.Since(start)))
-		}()
-		logger.Info("request.incoming", slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Int("msg_id", msgID), slog.String("request_id", rid), slog.String("client_ip", clientIP), slog.String("ip_range", ipRange))
+		// انتخاب چرخشی (Round Robin) از لیست خودمان
+		// برای سادگی فعلاً از همان pool استفاده می‌کنیم اما باید آیدی را داشته باشیم
+		// پیشنهاد: از آیدی رندوم استفاده کن یا BotPool را اصلاح کن
+		// اینجا برای تست، اولین ربات را می‌گیریم (باید متناسب با نیازت اصلاح کنی)
 
-		// ۱. چک کردن کش
-		if loc, size, found := getCachedLocation(msgID); found {
-			logger.Info("cache.hit", slog.Int("msg", msgID), slog.Int64("size", size))
-			handleFileStream(r.Context(), w, r, pool.GetNext(), loc, size)
-			return
-		}
-		logger.Info("cache.miss", slog.Int("msg", msgID))
+		targetBot := botClients[time.Now().UnixNano()%int64(len(botClients))]
 
-		// ۲. پیدا کردن فایل (اگر در کش نبود)
-		api := pool.GetNext()
-		if api == nil {
-			logger.Error("no bot clients available", slog.Int("msg", msgID))
-			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		logger.Info("fetching.message", slog.Int("msg", msgID), slog.Int64("channel", channelID))
-		access, err := ensureChannelAccess(r.Context(), api, channelID)
+		access, err := ensureChannelAccess(r.Context(), targetBot.API, targetBot.BotID, channelID)
 		if err != nil {
-			logger.Error("channel.access.missing", slog.Int64("channel", channelID), slog.String("err", err.Error()))
-			http.Error(w, "channel access not available", http.StatusInternalServerError)
-			return
-		}
-		res, err := api.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
-			Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(access)},
-			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
-		})
-		if err != nil {
-			logger.Error("ChannelsGetMessages.error", slog.Int("msg", msgID), slog.String("err", err.Error()))
-			http.Error(w, "error fetching message", http.StatusInternalServerError)
+			http.Error(w, "Access error", 500)
 			return
 		}
 
-		// استخراج لوکیشن از پاسخ
-		doc, size, err := extractDocumentFromResponse(res)
-		if err != nil || doc == nil {
-			logger.Info("no.document", slog.Int("msg", msgID), slog.String("err", err.Error()))
-			logger.Info("no.document", slog.Int("msg", msgID))
-			http.Error(w, "file not found in message", http.StatusNotFound)
-			return
+		cachedLoc, cachedSize, found := getCachedLocation(msgID)
+		var loc *tg.InputDocumentFileLocation
+		var size int64
+
+		if found {
+			loc = &tg.InputDocumentFileLocation{
+				ID:            cachedLoc.ID,
+				AccessHash:    int64(access),
+				FileReference: cachedLoc.FileReference,
+			}
+			size = cachedSize
+
+		} else {
+			res, err := targetBot.API.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
+				Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(access)},
+				ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
+			})
+			if err != nil {
+				return
+			}
+			doc, s, err := extractDocumentFromResponse(res)
+			if err != nil {
+				return
+			}
+			size = s
+			loc = &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: int64(access), FileReference: doc.FileReference}
+			setCachedLocation(msgID, loc, size)
 		}
 
-		logger.Info("document.found", slog.Int("msg", msgID), slog.Int64("size", size))
-		loc := &tg.InputDocumentFileLocation{
-			ID:            doc.ID,
-			AccessHash:    doc.AccessHash,
-			FileReference: doc.FileReference,
-		}
-		setCachedLocation(msgID, loc, size)
-		logger.Info("start.streaming", slog.Int("msg", msgID), slog.Int64("size", size), slog.String("to", clientIP))
-		handleFileStream(r.Context(), w, r, api, loc, size)
+		handleFileStream(r.Context(), w, r, targetBot.API, targetBot.BotID, access, loc, size)
 	})
 
-	// client IP helper is defined at package level
-
-	// Bind address can be configured with BIND_ADDR (e.g. 0.0.0.0:2040) or PORT
-	bindAddr := os.Getenv("BIND_ADDR")
-	if bindAddr == "" {
-		port := os.Getenv("PORT")
-		if port == "" {
-			port = "2040"
-		}
-		bindAddr = ":" + port
-	}
-	logger.Info("server.ready", slog.String("addr", bindAddr))
-
-	server := &http.Server{Addr: bindAddr, Handler: nil}
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("server.listen.error", slog.String("err", err.Error()))
-		}
-	}()
-
-	// Wait for shutdown signal (Ctrl+C)
-	<-ctx.Done()
-	logger.Info("shutdown.initiated")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("server.shutdown.error", slog.String("err", err.Error()))
-	}
-	// persist channel cache on shutdown
-	saveChannelCache()
-	logger.Info("shutdown.complete")
-	return
+	server := &http.Server{Addr: ":2040"}
+	server.ListenAndServe()
 }
 
-// getClientIP returns the best-effort remote IP and a simple range (/24 or /64)
-func getClientIP(r *http.Request) (string, string) {
-	ip := strings.TrimSpace(r.Header.Get("X-Real-IP"))
-	if ip == "" {
-		xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-		if xff != "" {
-			parts := strings.Split(xff, ",")
-			ip = strings.TrimSpace(parts[0])
-		}
-	}
-	if ip == "" {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr
-		} else {
-			ip = host
-		}
-	}
-
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return ip, ""
-	}
-	if parsed.To4() != nil {
-		parts := strings.Split(ip, ".")
-		if len(parts) >= 3 {
-			return ip, fmt.Sprintf("%s.%s.%s.0/24", parts[0], parts[1], parts[2])
-		}
-		return ip, ""
-	}
-	hext := strings.Split(ip, ":")
-	if len(hext) >= 4 {
-		return ip, strings.Join(hext[:4], ":") + "::/64"
-	}
-	return ip, ""
-}
-
-// extractDocumentFromResponse inspects the response from ChannelsGetMessages and returns
-// an InputDocumentFileLocation and its size if a document is found in any message.
-// This implementation uses reflection to avoid depending on concrete generated tg types
-// which may vary between versions.
 func extractDocumentFromResponse(res tg.MessagesMessagesClass) (*tg.Document, int64, error) {
-	// ۱. تبدیل اینترفیس به ساختار واقعی (Type Assertion)
 	var messages []tg.MessageClass
-
 	switch v := res.(type) {
 	case *tg.MessagesMessages:
 		messages = v.Messages
@@ -194,33 +122,22 @@ func extractDocumentFromResponse(res tg.MessagesMessagesClass) (*tg.Document, in
 	case *tg.MessagesChannelMessages:
 		messages = v.Messages
 	default:
-		return nil, 0, fmt.Errorf("unexpected response type: %T", res)
+		return nil, 0, fmt.Errorf("unexpected type: %T", res)
 	}
-
 	if len(messages) == 0 {
-		return nil, 0, errors.New("no messages in response")
+		return nil, 0, errors.New("no messages")
 	}
-
-	// ۲. استخراج مدیا از اولین پیام
 	msg, ok := messages[0].(*tg.Message)
-	if !ok {
-		return nil, 0, errors.New("message is not a regular message (maybe service message?)")
+	if !ok || msg.Media == nil {
+		return nil, 0, errors.New("no media")
 	}
-
-	if msg.Media == nil {
-		return nil, 0, errors.New("message has no media")
-	}
-
-	// ۳. چک کردن اینکه آیا مدیا واقعاً یک فایل (Document) است
 	mediaDoc, ok := msg.Media.(*tg.MessageMediaDocument)
 	if !ok {
-		return nil, 0, errors.New("media is not a document (maybe photo or poll?)")
+		return nil, 0, errors.New("not a document")
 	}
-
-	document, ok := mediaDoc.Document.(*tg.Document)
+	doc, ok := mediaDoc.Document.(*tg.Document)
 	if !ok {
-		return nil, 0, errors.New("document metadata not found")
+		return nil, 0, errors.New("cast failed")
 	}
-
-	return document, document.Size, nil
+	return doc, doc.Size, nil
 }
