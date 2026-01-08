@@ -29,6 +29,16 @@ func main() {
 	defer cancel()
 
 	pool, _ := NewBotPool(ctx, apiID, apiHash, tokens)
+	// Try to resolve channel access hash on startup using any available client
+	if c := pool.GetNext(); c != nil {
+		go func() {
+			if acc, err := ensureChannelAccess(ctx, c, channelID); err != nil {
+				logger.Error("channel.access.bootstrap.failed", slog.Int64("channel", channelID), slog.String("err", err.Error()))
+			} else {
+				logger.Info("channel.access.bootstrap", slog.Int64("channel", channelID), slog.Uint64("access", acc))
+			}
+		}()
+	}
 
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("id"))
@@ -62,8 +72,14 @@ func main() {
 			return
 		}
 		logger.Info("fetching.message", slog.Int("msg", msgID), slog.Int64("channel", channelID))
+		access, err := ensureChannelAccess(r.Context(), api, channelID)
+		if err != nil {
+			logger.Error("channel.access.missing", slog.Int64("channel", channelID), slog.String("err", err.Error()))
+			http.Error(w, "channel access not available", http.StatusInternalServerError)
+			return
+		}
 		res, err := api.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
-			Channel: &tg.InputChannel{ChannelID: channelID},
+			Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(access)},
 			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
 		})
 		if err != nil {
@@ -75,14 +91,14 @@ func main() {
 		// استخراج لوکیشن از پاسخ
 		loc, size, ok := extractDocumentFromResponse(res)
 		if !ok || loc == nil {
-			log.Printf("No document found in msg=%d", msgID)
+			logger.Info("no.document", slog.Int("msg", msgID))
 			http.Error(w, "file not found in message", http.StatusNotFound)
 			return
 		}
 
-		log.Printf("Found document for msg=%d size=%d — caching and streaming", msgID, size)
+		logger.Info("document.found", slog.Int("msg", msgID), slog.Int64("size", size))
 		setCachedLocation(msgID, loc, size)
-		log.Printf("Start streaming msg=%d size=%d to %s", msgID, size, clientIP)
+		logger.Info("start.streaming", slog.Int("msg", msgID), slog.Int64("size", size), slog.String("to", clientIP))
 		handleFileStream(r.Context(), w, api, loc, size)
 	})
 
@@ -97,10 +113,11 @@ func main() {
 		}
 		bindAddr = ":" + port
 	}
-	log.Printf("Server ready on %s", bindAddr)
+	logger.Info("server.ready", slog.String("addr", bindAddr))
 
 	err := http.ListenAndServe(bindAddr, nil)
 	if err != nil {
+		logger.Error("server.listen.error", slog.String("err", err.Error()))
 		log.Fatal(err)
 	}
 }

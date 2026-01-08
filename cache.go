@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -24,10 +24,10 @@ func getCachedLocation(msgID int) (*tg.InputDocumentFileLocation, int64, bool) {
 	defer cacheMu.RUnlock()
 	item, found := fileCache[msgID]
 	if found && time.Now().Before(item.Expires) {
-		log.Printf("cache hit: msg=%d size=%d expires=%s", msgID, item.Size, item.Expires)
+		logger.Info("cache.hit", slog.Int("msg", msgID), slog.Int64("size", item.Size), slog.String("expires", item.Expires.Format(time.RFC3339)))
 		return item.Location, item.Size, true
 	}
-	log.Printf("cache miss: msg=%d", msgID)
+	logger.Info("cache.miss", slog.Int("msg", msgID))
 	return nil, 0, false
 }
 
@@ -39,5 +39,5 @@ func setCachedLocation(msgID int, loc *tg.InputDocumentFileLocation, size int64)
 		Size:     size,
 		Expires:  time.Now().Add(3 * time.Hour),
 	}
-	log.Printf("cache set: msg=%d size=%d expires=%s", msgID, size, fileCache[msgID].Expires)
+	logger.Info("cache.set", slog.Int("msg", msgID), slog.Int64("size", size), slog.String("expires", fileCache[msgID].Expires.Format(time.RFC3339)))
 }

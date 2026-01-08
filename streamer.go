@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gotd/td/tg"
@@ -14,7 +14,7 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, api *tg.Client
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	log.Printf("stream started size=%d", size)
+	logger.Info("stream.started", slog.Int64("size", size))
 
 	const chunkSize = 1024 * 1024 // 1MB
 	offset := int64(0)
@@ -26,22 +26,22 @@ func handleFileStream(ctx context.Context, w http.ResponseWriter, api *tg.Client
 			Limit:    chunkSize,
 		})
 		if err != nil {
-			log.Printf("UploadGetFile error at offset=%d: %v", offset, err)
+			logger.Error("upload.getfile.error", slog.Int64("offset", offset), slog.String("err", err.Error()))
 			return
 		}
 
 		if chunk, ok := res.(*tg.UploadFile); ok {
 			_, err := w.Write(chunk.Bytes)
 			if err != nil {
-				log.Printf("write to response failed at offset=%d: %v", offset, err)
+				logger.Error("response.write.error", slog.Int64("offset", offset), slog.String("err", err.Error()))
 				return
 			}
 			offset += int64(len(chunk.Bytes))
-			log.Printf("streamed chunk offset=%d size=%d", offset, len(chunk.Bytes))
+			logger.Info("stream.chunk", slog.Int64("offset", offset), slog.Int("size", len(chunk.Bytes)))
 		} else {
-			log.Printf("unexpected UploadGetFile response type at offset=%d", offset)
+			logger.Error("upload.getfile.unexpected_response", slog.Int64("offset", offset))
 			break
 		}
 	}
-	log.Printf("stream finished size=%d", size)
+	logger.Info("stream.finished", slog.Int64("size", size))
 }

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync/atomic"
 
 	"github.com/gotd/td/session"
@@ -34,24 +34,24 @@ func NewBotPool(ctx context.Context, apiID int, apiHash string, tokens []string)
 			if err := c.Run(ctx, func(ctx context.Context) error {
 				status, err := c.Auth().Status(ctx)
 				if err != nil {
-					log.Printf("auth status error for bot %s: %v", short, err)
+					logger.Error("auth.status.error", slog.String("bot", short), slog.String("err", err.Error()))
 				}
 				if !status.Authorized {
 					_, err := c.Auth().Bot(ctx, t)
 					if err != nil {
-						log.Printf("bot auth failed for %s: %v", short, err)
+						logger.Error("bot.auth.failed", slog.String("bot", short), slog.String("err", err.Error()))
 					} else {
-						log.Printf("bot authorized for %s", short)
+						logger.Info("bot.authorized", slog.String("bot", short))
 					}
 				} else {
-					log.Printf("bot already authorized for %s", short)
+					logger.Info("bot.already.authorized", slog.String("bot", short))
 				}
 				<-ctx.Done()
 				return nil
 			}); err != nil {
-				log.Printf("client.Run exited for %s: %v", short, err)
+				logger.Error("client.run.exit", slog.String("bot", short), slog.String("err", err.Error()))
 			} else {
-				log.Printf("client.Run exited for %s", short)
+				logger.Info("client.run.exit", slog.String("bot", short))
 			}
 		}(token, client)
 
