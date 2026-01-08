@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"reflect"
@@ -74,6 +75,7 @@ func fetchChannelInfo(ctx context.Context, api *tg.Client, channelID int64) (str
 		ChannelID: channelID,
 	}
 	res, err := api.ChannelsGetFullChannel(ctx, channel)
+	logger.Info("Channel Response ", slog.Any("res", res), slog.String("err", fmt.Sprintf("%v", err)))
 	if err != nil {
 		return "", 0, err
 	}
@@ -162,6 +164,7 @@ func ensureChannelAccess(ctx context.Context, api *tg.Client, channelID int64) (
 	// As a last resort try to fetch channel info directly which may return AccessHash
 	// This does not require CHANNEL_USERNAME; some servers allow fetching channel via ID
 	if c := api; c != nil {
+		logger.Info("fetching.channel.info", slog.Int64("channel", channelID))
 		if name, acc, err := fetchChannelInfo(ctx, c, channelID); err == nil {
 			channelAccessMu.Lock()
 			channelAccess[channelID] = uint64(acc)
