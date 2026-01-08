@@ -41,3 +41,11 @@ func setCachedLocation(msgID int, loc *tg.InputDocumentFileLocation, size int64)
 	}
 	logger.Info("cache.set", slog.Int("msg", msgID), slog.Int64("size", size), slog.String("expires", fileCache[msgID].Expires.Format(time.RFC3339)))
 }
+
+// تابع جدید برای حذف کش فاسد
+func deleteCachedLocation(msgID int) {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	delete(fileCache, msgID)
+	logger.Warn("cache.deleted", slog.Int("msg", msgID))
+}

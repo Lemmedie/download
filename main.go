@@ -16,7 +16,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// ساختار برای جفت کردن کلاینت و آیدی ربات
 type BotClient struct {
 	API   *tg.Client
 	BotID int64
@@ -37,20 +36,15 @@ func main() {
 		panic(err)
 	}
 
-	// ۱. ایجاد یک لیست از BotClient ها با استفاده از توکن
 	var botClients []BotClient
 	for _, t := range tokens {
 		parts := strings.Split(t, ":")
 		if len(parts) > 0 {
 			bID, _ := strconv.ParseInt(parts[0], 10, 64)
-			botClients = append(botClients, BotClient{
-				API:   pool.GetNext(), // ترتیب کلاینت‌ها در پول با توکن‌ها یکی است
-				BotID: bID,
-			})
+			botClients = append(botClients, BotClient{API: pool.GetNext(), BotID: bID})
 		}
 	}
 
-	// ۲. Bootstrap کردن هش‌ها
 	for _, bc := range botClients {
 		go func(bot BotClient) {
 			acc, err := ensureChannelAccess(ctx, bot.API, bot.BotID, channelID)
@@ -62,54 +56,67 @@ func main() {
 
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("id"))
-
-		// انتخاب چرخشی (Round Robin) از لیست خودمان
-		// برای سادگی فعلاً از همان pool استفاده می‌کنیم اما باید آیدی را داشته باشیم
-		// پیشنهاد: از آیدی رندوم استفاده کن یا BotPool را اصلاح کن
-		// اینجا برای تست، اولین ربات را می‌گیریم (باید متناسب با نیازت اصلاح کنی)
-
 		targetBot := botClients[time.Now().UnixNano()%int64(len(botClients))]
 
-		access, err := ensureChannelAccess(r.Context(), targetBot.API, targetBot.BotID, channelID)
-		if err != nil {
-			http.Error(w, "Access error", 500)
-			return
-		}
-
-		cachedLoc, cachedSize, found := getCachedLocation(msgID)
-		var loc *tg.InputDocumentFileLocation
-		var size int64
-
-		if found {
-			loc = &tg.InputDocumentFileLocation{
-				ID:            cachedLoc.ID,
-				AccessHash:    int64(access),
-				FileReference: cachedLoc.FileReference,
-			}
-			size = cachedSize
-
-		} else {
-			res, err := targetBot.API.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
-				Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(access)},
-				ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
-			})
+		// گلوله حقیقت: حداکثر ۲ تلاش برای مقابله با انقضای فایل
+		for attempt := 1; attempt <= 2; attempt++ {
+			access, err := ensureChannelAccess(r.Context(), targetBot.API, targetBot.BotID, channelID)
 			if err != nil {
+				http.Error(w, "Access error", 500)
 				return
 			}
-			doc, s, err := extractDocumentFromResponse(res)
+
+			cachedLoc, cachedSize, found := getCachedLocation(msgID)
+			var loc *tg.InputDocumentFileLocation
+			var size int64
+
+			if found {
+				loc = &tg.InputDocumentFileLocation{
+					ID:            cachedLoc.ID,
+					AccessHash:    int64(access),
+					FileReference: cachedLoc.FileReference,
+				}
+				size = cachedSize
+			} else {
+				res, err := targetBot.API.ChannelsGetMessages(r.Context(), &tg.ChannelsGetMessagesRequest{
+					Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: int64(access)},
+					ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
+				})
+				if err != nil {
+					http.Error(w, "Telegram fetch error", 500)
+					return
+				}
+				doc, s, err := extractDocumentFromResponse(res)
+				if err != nil {
+					http.Error(w, "File not found", 404)
+					return
+				}
+				size = s
+				loc = &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: int64(access), FileReference: doc.FileReference}
+				setCachedLocation(msgID, loc, size)
+			}
+
+			// تلاش برای استریم
+			err = handleFileStream(r.Context(), w, r, targetBot.API, targetBot.BotID, access, loc, size)
+
 			if err != nil {
+				// چک کردن خطای انقضای رفرنس
+				if strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
+					logger.Warn("expired_ref_detected. clearing_cache_and_retrying", slog.Int("msg", msgID), slog.Int("attempt", attempt))
+					deleteCachedLocation(msgID)
+					if attempt < 2 {
+						continue
+					} // تلاش دوباره
+				}
+				logger.Error("stream.error", slog.String("err", err.Error()))
 				return
 			}
-			size = s
-			loc = &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: int64(access), FileReference: doc.FileReference}
-			setCachedLocation(msgID, loc, size)
+			break // خروج از حلقه در صورت موفقیت
 		}
-
-		handleFileStream(r.Context(), w, r, targetBot.API, targetBot.BotID, access, loc, size)
 	})
 
-	server := &http.Server{Addr: ":2040"}
-	server.ListenAndServe()
+	logger.Info("server.running", slog.String("port", "2040"))
+	_ = http.ListenAndServe(":2040", nil)
 }
 
 func extractDocumentFromResponse(res tg.MessagesMessagesClass) (*tg.Document, int64, error) {
