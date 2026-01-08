@@ -60,39 +60,17 @@ func ensureChannelAccess(ctx context.Context, api *tg.Client, channelID int64) (
 	// این متد تنها متدی است که بدون داشتن هش، اطلاعات کامل (شامل هش) را برمی‌گرداند
 
 	// ۳. تلاش از طریق لیست گفتگوها (اگر ربات عضو کانال است)
-	res, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
-		OffsetPeer: &tg.InputPeerEmpty{}, // این خط ارور شما را حل می‌کند
-		Limit:      100,
+	res, err := api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+		&tg.InputChannel{ChannelID: channelID, AccessHash: 0}, // تست با هش صفر
 	})
-	if err != nil {
-		logger.Error("failed to get dialogs", slog.String("err", err.Error()))
-	} else {
-		var chats []tg.ChatClass
-		switch v := res.(type) {
-		case *tg.MessagesDialogs:
-			chats = v.Chats
-		case *tg.MessagesDialogsSlice:
-			chats = v.Chats
-		}
-
-		logger.Info("checking dialogs list", slog.Int("count", len(chats)))
-
-		for _, chat := range chats {
-			// چاپ اطلاعات هر چت برای بررسی دستی
-			switch c := chat.(type) {
-			case *tg.Channel:
-				logger.Info("found channel in dialogs",
-					slog.String("title", c.Title),
-					slog.Int64("id", c.ID),
-					slog.Int64("access_hash", c.AccessHash),
-				)
-				if c.ID == channelID {
-					acc := uint64(c.AccessHash)
+	if err == nil {
+		if chats, ok := res.(*tg.MessagesChats); ok {
+			for _, chat := range chats.Chats {
+				if ch, ok := chat.(*tg.Channel); ok && ch.ID == channelID {
+					acc := uint64(ch.AccessHash)
 					updateLocalCache(channelID, acc)
 					return acc, nil
 				}
-			case *tg.Chat:
-				logger.Info("found basic group (not channel)", slog.String("title", c.Title), slog.Int64("id", c.ID))
 			}
 		}
 	}
